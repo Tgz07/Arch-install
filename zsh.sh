@@ -1,227 +1,535 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# =============================================================================
+#  install_zsh.sh — Auto-detect OS & install Zsh + plugins from scratch
+#  Supports: Arch, Debian/Ubuntu, Fedora/RHEL, macOS, Alpine, Termux (Android)
+# =============================================================================
 
-# =====================================================
-# Script cài đặt ZSH cho Arch Linux
-# Tính năng:
-# - Cập nhật hệ thống
-# - Xoá cấu hình ZSH cũ (nếu có) và cài lại mới
-# - Thêm alias, plugins, theme
-# - Tự động chuyển ZSH làm shell mặc định
-# =====================================================
+set -euo pipefail
 
-set -e  # Dừng script nếu có lỗi
+# ── Colors ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
-# Màu sắc cho terminal
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+log()  { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+ok()   { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn() { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+die()  { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+sep()  { echo -e "${BOLD}────────────────────────────────────────────────────${RESET}"; }
 
-print_msg() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
+# =============================================================================
+# 1. DETECT OS & RUNTIME ENVIRONMENT
+# =============================================================================
+sep
+log "Detecting system environment..."
 
-print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
+OS=""
+DISTRO=""
+PKG_MGR=""
+INSTALL_CMD=""
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 1. Cập nhật hệ thống
-print_msg "Đang cập nhật hệ thống Arch Linux..."
-sudo pacman -Syu --noconfirm
-
-# 2. Cài đặt ZSH và các gói cần thiết
-print_msg "Cài đặt ZSH và các gói bổ trợ..."
-sudo pacman -S --noconfirm zsh zsh-completions zsh-syntax-highlighting zsh-autosuggestions git curl wget
-
-# 3. Xoá cấu hình ZSH cũ nếu tồn tại
-if [ -d ~/.zsh ] || [ -f ~/.zshrc ] || [ -f ~/.zsh_history ]; then
-    print_warn "Phát hiện cấu hình ZSH cũ. Đang xoá..."
-    rm -rf ~/.zsh ~/.zshrc ~/.zsh_history ~/.zshrc.old ~/.zshrc.pre-oh-my-zsh 2>/dev/null
-    print_msg "Đã xoá cấu hình cũ."
+# Detect runtime (Docker / Termux / WSL / native)
+RUNTIME="native"
+if [ -f /.dockerenv ]; then
+    RUNTIME="docker"
+elif [[ "$(uname -r)" == *microsoft* ]] || [[ "$(uname -r)" == *WSL* ]]; then
+    RUNTIME="wsl"
+elif [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]; then
+    RUNTIME="termux"
 fi
 
-# 4. Cài đặt Oh My ZSH (framework phổ biến cho ZSH)
-print_msg "Cài đặt Oh My ZSH..."
-if [ -d ~/.oh-my-zsh ]; then
-    print_warn "Oh My ZSH đã tồn tại. Đang xoá và cài lại..."
-    rm -rf ~/.oh-my-zsh
+case "$(uname -s)" in
+    Linux)
+        OS="linux"
+        if [[ "$RUNTIME" == "termux" ]]; then
+            DISTRO="termux"
+            PKG_MGR="pkg"
+            INSTALL_CMD="pkg install -y"
+        elif [ -f /etc/os-release ]; then
+            # shellcheck disable=SC1091
+            source /etc/os-release
+            DISTRO="${ID:-unknown}"
+            case "$DISTRO" in
+                arch|manjaro|endeavouros|garuda)
+                    PKG_MGR="pacman"; INSTALL_CMD="sudo pacman -S --noconfirm" ;;
+                ubuntu|debian|linuxmint|pop|kali|raspbian)
+                    PKG_MGR="apt";    INSTALL_CMD="sudo apt-get install -y" ;;
+                fedora)
+                    PKG_MGR="dnf";    INSTALL_CMD="sudo dnf install -y" ;;
+                centos|rhel|rocky|almalinux)
+                    PKG_MGR="dnf";    INSTALL_CMD="sudo dnf install -y" ;;
+                opensuse*|sles)
+                    PKG_MGR="zypper"; INSTALL_CMD="sudo zypper install -y" ;;
+                alpine)
+                    PKG_MGR="apk";    INSTALL_CMD="sudo apk add --no-cache" ;;
+                void)
+                    PKG_MGR="xbps";   INSTALL_CMD="sudo xbps-install -y" ;;
+                nixos)
+                    die "NixOS detected — use nix-env or home-manager to install zsh." ;;
+                *)
+                    if command -v apt-get &>/dev/null; then
+                        PKG_MGR="apt"; INSTALL_CMD="sudo apt-get install -y"
+                    elif command -v pacman &>/dev/null; then
+                        PKG_MGR="pacman"; INSTALL_CMD="sudo pacman -S --noconfirm"
+                    elif command -v dnf &>/dev/null; then
+                        PKG_MGR="dnf"; INSTALL_CMD="sudo dnf install -y"
+                    else
+                        die "Unsupported Linux distro: $DISTRO. Install zsh manually."
+                    fi
+                    ;;
+            esac
+        fi
+        ;;
+    Darwin)
+        OS="macos"
+        DISTRO="macos"
+        if command -v brew &>/dev/null; then
+            PKG_MGR="brew"; INSTALL_CMD="brew install"
+        else
+            warn "Homebrew not found — installing it first..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            PKG_MGR="brew"; INSTALL_CMD="brew install"
+        fi
+        ;;
+    *)
+        die "Unsupported OS: $(uname -s)"
+        ;;
+esac
+
+ok "OS:      $OS"
+ok "Distro:  $DISTRO"
+ok "Runtime: $RUNTIME"
+ok "Package manager: $PKG_MGR"
+sep
+
+# =============================================================================
+# 2. UNINSTALL EXISTING ZSH SETUP (full clean)
+# =============================================================================
+sep
+log "Removing existing Zsh installation and config..."
+
+# Kill any lingering zsh processes (best-effort)
+pkill zsh 2>/dev/null || true
+
+# Remove config files
+for f in \
+    "$HOME/.zshrc" \
+    "$HOME/.zshenv" \
+    "$HOME/.zprofile" \
+    "$HOME/.zlogin" \
+    "$HOME/.zlogout" \
+    "$HOME/.p10k.zsh" \
+    "$HOME/.zsh_history" \
+    "$HOME/.zcompdump"*
+do
+    [ -e "$f" ] && { rm -f "$f"; warn "Removed: $f"; }
+done
+
+# Remove plugin managers and their directories
+for d in \
+    "$HOME/.oh-my-zsh" \
+    "$HOME/.local/share/zinit" \
+    "$HOME/.zim" \
+    "$HOME/.antidote" \
+    "$HOME/.zplug" \
+    "$HOME/.zsh" \
+    "$HOME/.zsh_plugins" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/zsh"
+do
+    [ -d "$d" ] && { rm -rf "$d"; warn "Removed: $d"; }
+done
+
+[ -f "$HOME/.zimrc"  ] && { rm -f "$HOME/.zimrc";  warn "Removed: ~/.zimrc"; }
+[ -f "$HOME/.antigen" ] && { rm -f "$HOME/.antigen"; warn "Removed: ~/.antigen"; }
+
+# Uninstall zsh package
+log "Uninstalling zsh package..."
+case "$PKG_MGR" in
+    pacman)  sudo pacman -Rns --noconfirm zsh 2>/dev/null || true ;;
+    apt)     sudo apt-get remove -y --purge zsh zsh-common 2>/dev/null || true ;;
+    dnf)     sudo dnf remove -y zsh 2>/dev/null || true ;;
+    zypper)  sudo zypper remove -y zsh 2>/dev/null || true ;;
+    apk)     sudo apk del zsh 2>/dev/null || true ;;
+    xbps)    sudo xbps-remove -y zsh 2>/dev/null || true ;;
+    brew)    brew uninstall --force zsh 2>/dev/null || true ;;
+    pkg)     pkg uninstall -y zsh 2>/dev/null || true ;;
+esac
+
+ok "Clean-up complete."
+sep
+
+# =============================================================================
+# 3. INSTALL ZSH
+# =============================================================================
+sep
+log "Installing Zsh..."
+
+case "$PKG_MGR" in
+    apt)
+        sudo apt-get update -y
+        $INSTALL_CMD zsh zsh-doc curl git
+        ;;
+    pacman)
+        sudo pacman -Sy --noconfirm
+        $INSTALL_CMD zsh curl git
+        ;;
+    dnf)
+        $INSTALL_CMD zsh curl git
+        ;;
+    zypper)
+        $INSTALL_CMD zsh curl git
+        ;;
+    apk)
+        $INSTALL_CMD zsh curl git bash
+        ;;
+    xbps)
+        $INSTALL_CMD zsh curl git
+        ;;
+    brew)
+        $INSTALL_CMD zsh curl git
+        ;;
+    pkg)
+        pkg update -y
+        $INSTALL_CMD zsh curl git
+        ;;
+esac
+
+ZSH_BIN="$(command -v zsh)"
+ok "Zsh installed: $ZSH_BIN ($(zsh --version))"
+sep
+
+# =============================================================================
+# 4. INSTALL ZINIT (plugin manager)
+# =============================================================================
+sep
+log "Installing Zinit plugin manager..."
+
+ZINIT_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/zinit/zinit.git"
+mkdir -p "$(dirname "$ZINIT_HOME")"
+git clone --depth=1 https://github.com/zdharma-continuum/zinit.git "$ZINIT_HOME"
+ok "Zinit installed at: $ZINIT_HOME"
+sep
+
+# =============================================================================
+# 5. INSTALL MESLO NERD FONT (for Powerlevel10k icons)
+# =============================================================================
+sep
+log "Installing Meslo Nerd Font..."
+
+if [[ "$OS" == "linux" && "$RUNTIME" != "termux" ]]; then
+    FONT_DIR="$HOME/.local/share/fonts"
+    mkdir -p "$FONT_DIR"
+    BASE="https://github.com/romkatv/powerlevel10k-media/raw/master"
+    for font in "MesloLGS NF Regular.ttf" "MesloLGS NF Bold.ttf" \
+                "MesloLGS NF Italic.ttf" "MesloLGS NF Bold Italic.ttf"; do
+        encoded="${font// /%20}"
+        curl -fsSL "$BASE/$encoded" -o "$FONT_DIR/$font" && log "  Downloaded: $font"
+    done
+    fc-cache -fv "$FONT_DIR" &>/dev/null && ok "Font cache updated."
+elif [[ "$OS" == "macos" ]]; then
+    warn "macOS: Install font manually or via:"
+    warn "  brew tap homebrew/cask-fonts && brew install --cask font-meslo-lg-nerd-font"
+else
+    warn "Termux: Install 'MesloLGS NF' font manually in your terminal app."
+fi
+sep
+
+# =============================================================================
+# 6. WRITE ~/.zshrc
+# =============================================================================
+sep
+log "Writing ~/.zshrc..."
+
+cat > "$HOME/.zshrc" << 'ZSHRC'
+# =============================================================================
+# ~/.zshrc — Zsh configuration with Zinit
+# Generated by install_zsh.sh
+# =============================================================================
+
+# !! IMPORTANT: Instant prompt MUST be the very first thing — before any output,
+# !! any `source`, any command that prints to stdout/stderr.
+# !! Do NOT move this block down.
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 fi
 
-RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" -- --unattended
+# Skip global compinit (we call it manually below for speed)
+skip_global_compinit=1
 
-# 5. Cài đặt Powerlevel10k theme (đẹp, nhiều tính năng)
-print_msg "Cài đặt Powerlevel10k theme..."
-git clone --depth=1 https://github.com/romkatv/powerlevel10k.git ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k
+# ── Zinit bootstrap ──────────────────────────────────────────────────────────
+# Redirect Zinit's own init messages so they don't pollute instant prompt
+ZINIT_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/zinit/zinit.git"
+{
+  source "${ZINIT_HOME}/zinit.zsh"
+  autoload -Uz _zinit
+  (( ${+_comps} )) && _comps[zinit]=_zinit
+} 2>/dev/null
 
-# FIX: Cài plugins đúng thư mục cho Oh My ZSH
-print_msg "Cài đặt plugins zsh-autosuggestions & zsh-syntax-highlighting (fix path)..."
+# =============================================================================
+# PLUGINS
+# =============================================================================
 
-git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions
+# Theme: Powerlevel10k — loaded synchronously (no wait) so instant prompt works
+zinit ice depth=1; zinit light romkatv/powerlevel10k
 
-git clone https://github.com/zsh-users/zsh-syntax-highlighting ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+# Extra completions for 300+ tools
+zinit ice wait lucid
+zinit light zsh-users/zsh-completions
 
-# 6. Cấu hình .zshrc với các lệnh cần thiết
-print_msg "Đang cấu hình .zshrc..."
-cat > ~/.zshrc << 'EOF'
-# ZSH configuration - Generated by zsh.sh
+# Fish-like inline suggestions (→ arrow to accept)
+zinit ice wait lucid atload"_zsh_autosuggest_start"
+zinit light zsh-users/zsh-autosuggestions
 
-# Fix Powerlevel10k instant prompt warning
-typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
+# Real-time syntax highlighting
+zinit ice wait lucid
+zinit light zsh-users/zsh-syntax-highlighting
 
-# Path to Oh My ZSH
-export ZSH="$HOME/.oh-my-zsh"
+# History substring search with ↑↓ arrows
+zinit ice wait lucid
+zinit light zsh-users/zsh-history-substring-search
+bindkey '^[[A' history-substring-search-up
+bindkey '^[[B' history-substring-search-down
+bindkey '^P'   history-substring-search-up
+bindkey '^N'   history-substring-search-down
 
-# Theme: Powerlevel10k
-ZSH_THEME="powerlevel10k/powerlevel10k"
+# Replace tab-completion with fzf preview
+zinit ice wait lucid
+zinit light Aloxaf/fzf-tab
 
-# Plugins cần thiết
-plugins=(
-    git
-    docker
-    archlinux
-    systemd
-    sudo
-    zsh-autosuggestions
-    zsh-syntax-highlighting
-    colored-man-pages
-    command-not-found
-    extract
-    history
-    web-search
-)
+# Jump to frecent directories (type `z foo`)
+zinit ice wait lucid
+zinit light agkozak/zsh-z
 
-# Khởi tạo Oh My ZSH
-source $ZSH/oh-my-zsh.sh
+# Auto-close brackets & quotes
+zinit ice wait lucid
+zinit light hlissner/zsh-autopair
 
-# ========== CÁC LỆNH ALIAS CẦN THIẾT ==========
+# Remind you of existing aliases
+zinit ice wait lucid
+zinit light MichaelAquilina/zsh-you-should-use
 
-# System
-alias update='sudo pacman -Syu'
-alias install='sudo pacman -S'
-alias remove='sudo pacman -Rns'
-alias clean='sudo pacman -Scc'
-alias search='pacman -Ss'
-alias list='pacman -Q'
-alias orphans='pacman -Qtdq'
-alias rmorphans='sudo pacman -Rns $(pacman -Qtdq) 2>/dev/null || echo "No orphans found"'
+# Colored man pages
+zinit ice wait lucid
+zinit light ael-code/zsh-colored-man-pages
 
-# ZSH
-alias zshconfig='nano ~/.zshrc'
-alias zshsource='source ~/.zshrc'
-alias reload='source ~/.zshrc'
+# Press ESC ESC to prepend sudo to last command
+zinit ice wait lucid; zinit snippet OMZP::sudo
 
-# Systemd
-alias start='sudo systemctl start'
-alias stop='sudo systemctl stop'
-alias restart='sudo systemctl restart'
-alias status='systemctl status'
-alias enable='sudo systemctl enable'
-alias disable='sudo systemctl disable'
+# Git aliases (ga, gc, gp, glog, etc.)
+zinit ice wait lucid; zinit snippet OMZP::git
 
-# Docker
-alias d='docker'
-alias dc='docker-compose'
-alias dps='docker ps'
-alias di='docker images'
-alias dexec='docker exec -it'
+# Extract any archive with `x file.tar.gz`
+zinit ice wait lucid; zinit snippet OMZP::extract
 
-# Lệnh thông dụng
-alias ls='ls --color=auto'
-alias ll='ls -lah'
-alias la='ls -A'
-alias l='ls -CF'
-alias grep='grep --color=auto'
-alias df='df -h'
-alias du='du -h'
-alias free='free -h'
-alias mkdir='mkdir -pv'
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
+# Copy current path to clipboard
+zinit ice wait lucid; zinit snippet OMZP::copypath
 
-# Git
-alias gs='git status'
-alias ga='git add'
-alias gc='git commit'
-alias gp='git push'
-alias gl='git pull'
-alias gd='git diff'
-alias glog='git log --oneline --graph'
+# Web search: `google query`, `github query`, etc.
+zinit ice wait lucid; zinit snippet OMZP::web-search
 
-# ========== CÁC CẤU HÌNH BỔ SUNG ==========
+# fzf binary
+zinit ice wait lucid from"gh-r" as"program"
+zinit light junegunn/fzf
 
-# Lịch sử ZSH
-HISTSIZE=10000
-SAVEHIST=10000
-HISTFILE=~/.zsh_history
-setopt INC_APPEND_HISTORY
+# eza — modern ls replacement
+zinit ice wait lucid from"gh-r" as"program" mv"eza* -> eza"
+zinit light eza-community/eza
+
+# bat — cat with syntax highlighting
+zinit ice wait lucid from"gh-r" as"program" mv"bat*/bat -> bat"
+zinit light sharkdp/bat
+
+# fd — fast find alternative
+zinit ice wait lucid from"gh-r" as"program" mv"fd*/fd -> fd"
+zinit light sharkdp/fd
+
+# ripgrep — fast grep
+zinit ice wait lucid from"gh-r" as"program" mv"ripgrep*/rg -> rg"
+zinit light BurntSushi/ripgrep
+
+# =============================================================================
+# COMPLETION SYSTEM
+# =============================================================================
+autoload -Uz compinit
+# Only rebuild once per day for speed
+if [[ -n ${ZDOTDIR:-$HOME}/.zcompdump(#qN.mh+24) ]]; then
+    compinit
+else
+    compinit -C
+fi
+
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Za-z}'
+zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+zstyle ':completion:*:descriptions' format '[%d]'
+zstyle ':fzf-tab:complete:cd:*' fzf-preview 'ls --color $realpath'
+zstyle ':fzf-tab:*' switch-group ',' '.'
+
+# =============================================================================
+# HISTORY
+# =============================================================================
+HISTFILE="$HOME/.zsh_history"
+HISTSIZE=50000
+SAVEHIST=50000
+setopt HIST_IGNORE_ALL_DUPS
+setopt HIST_IGNORE_SPACE
+setopt HIST_VERIFY
 setopt SHARE_HISTORY
+setopt EXTENDED_HISTORY
+setopt INC_APPEND_HISTORY
 
-# Các tuỳ chọn ZSH
+# =============================================================================
+# SHELL OPTIONS
+# =============================================================================
 setopt AUTO_CD
 setopt AUTO_PUSHD
 setopt PUSHD_IGNORE_DUPS
+setopt CORRECT
 setopt INTERACTIVE_COMMENTS
+setopt GLOB_DOTS
+setopt NO_BEEP
 
-# Completion
-autoload -Uz compinit
-compinit
-zstyle ':completion:*' menu select
-zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+# =============================================================================
+# ALIASES
+# =============================================================================
 
-# Prompt
-export PS1="%n@%m: %~ $ "
+# Navigation
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
+alias ~="cd ~"
+alias -- -="cd -"
 
-# Syntax highlighting
-source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh 2>/dev/null
-
-# Autosuggestions
-source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh 2>/dev/null
-
-EOF
-
-# 7. Thêm cấu hình Powerlevel10k (tự động)
-print_msg "Thêm cấu hình mặc định cho Powerlevel10k..."
-cat > ~/.p10k.zsh << 'EOF'
-# Powerlevel10k configuration - đơn giản, hiệu quả
-POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
-POWERLEVEL9K_MODE='nerdfont-complete'
-POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(os_icon context dir vcs)
-POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(status root_indicator background_jobs time)
-POWERLEVEL9K_SHORTEN_DIR_LENGTH=2
-EOF
-
-# 8. Đặt ZSH làm shell mặc định (nếu chưa)
-print_msg "Đặt ZSH làm shell mặc định..."
-CURRENT_SHELL=$(basename "$SHELL")
-if [ "$CURRENT_SHELL" != "zsh" ]; then
-    chsh -s "$(which zsh)"
-    print_msg "Đã chuyển shell mặc định thành ZSH. Cần đăng xuất và đăng nhập lại để áp dụng."
+# ls → eza (fallback to system ls)
+if command -v eza &>/dev/null; then
+    alias ls="eza --icons --group-directories-first"
+    alias ll="eza -la --icons --git --group-directories-first"
+    alias lt="eza --tree --icons --level=2"
+    alias la="eza -a --icons --group-directories-first"
 else
-    print_msg "ZSH đã là shell mặc định."
+    alias ls="ls --color=auto"
+    alias ll="ls -lah --color=auto"
+    alias la="ls -A --color=auto"
 fi
 
-# 9. Hoàn tất
-print_msg "=========================================="
-print_msg "Cài đặt ZSH hoàn tất!"
-print_msg "=========================================="
-print_msg "Các alias chính:"
-print_msg "  - update : Cập nhật hệ thống"
-print_msg "  - install <pkg> : Cài gói"
-print_msg "  - remove <pkg> : Xoá gói"
-print_msg "  - clean : Dọn dẹp cache pacman"
-print_msg "  - reload : Tải lại .zshrc"
-print_msg "  - zshconfig : Sửa .zshrc"
-print_msg ""
-print_msg "Để bắt đầu dùng ZSH ngay, gõ: zsh"
-print_msg "Hoặc đăng xuất và đăng nhập lại để dùng ZSH mặc định."
+# cat → bat
+command -v bat &>/dev/null && alias cat="bat --paging=never"
 
-# 10. Khởi động ZSH
-if [ -z "$ZSH_VERSION" ]; then
-    print_msg "Khởi động ZSH..."
-    exec zsh
+# grep
+alias grep="grep --color=auto"
+
+# Git shortcuts
+alias g="git"
+alias gs="git status -sb"
+alias ga="git add"
+alias gc="git commit"
+alias gp="git push"
+alias gpl="git pull"
+alias gl="git log --oneline --graph --decorate"
+alias gd="git diff"
+alias gco="git checkout"
+alias gb="git branch"
+
+# Safety nets
+alias rm="rm -i"
+alias cp="cp -i"
+alias mv="mv -i"
+
+# Utilities
+alias zshrc="${EDITOR:-vim} ~/.zshrc"
+alias reload="source ~/.zshrc"
+alias path='echo -e ${PATH//:/\\n}'
+alias ports="ss -tulnp"
+alias myip="curl -s ifconfig.me"
+alias weather="curl wttr.in"
+alias sizeof="du -sh"
+alias diff="diff --color=auto"
+
+# =============================================================================
+# ENVIRONMENT
+# =============================================================================
+export EDITOR="${EDITOR:-nvim}"
+[ ! -x "$(command -v nvim)" ] && export EDITOR="vim"
+export PAGER="less"
+export LESS="-R"
+
+# bat as man pager
+export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+
+# fzf
+export FZF_DEFAULT_OPTS="
+    --height 40% --border rounded --info inline --layout reverse
+    --preview-window right:50%
+    --color=fg:#cdd6f4,bg:#1e1e2e,hl:#f38ba8
+    --color=fg+:#cdd6f4,bg+:#313244,hl+:#f38ba8
+    --color=info:#cba6f7,prompt:#f38ba8,pointer:#f5e0dc
+    --color=marker:#b5e8e0,spinner:#f5e0dc,header:#87afaf
+"
+export FZF_DEFAULT_COMMAND="fd --type f --hidden --follow --exclude .git"
+export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+
+# Key bindings
+bindkey -e
+bindkey '^[[H' beginning-of-line
+bindkey '^[[F' end-of-line
+bindkey '^[[3~' delete-char
+bindkey '^[[1;5C' forward-word
+bindkey '^[[1;5D' backward-word
+
+# =============================================================================
+# LOCAL MACHINE OVERRIDES
+# =============================================================================
+[ -f "$HOME/.zshrc.local" ] && source "$HOME/.zshrc.local"
+
+# =============================================================================
+# POWERLEVEL10K — run `p10k configure` to set up your prompt
+# =============================================================================
+[[ -f ~/.p10k.zsh ]] && source ~/.p10k.zsh
+ZSHRC
+
+ok "~/.zshrc written."
+sep
+
+# =============================================================================
+# 7. SET ZSH AS DEFAULT SHELL
+# =============================================================================
+sep
+log "Setting Zsh as default shell..."
+
+if [[ "$RUNTIME" == "termux" ]]; then
+    warn "Termux: run 'zsh' to start Zsh. chsh is not supported here."
+else
+    if ! grep -qx "$ZSH_BIN" /etc/shells 2>/dev/null; then
+        echo "$ZSH_BIN" | sudo tee -a /etc/shells >/dev/null
+        ok "Added $ZSH_BIN to /etc/shells"
+    fi
+
+    if [[ "$SHELL" != "$ZSH_BIN" ]]; then
+        chsh -s "$ZSH_BIN" "$USER" && ok "Default shell changed to: $ZSH_BIN"
+    else
+        ok "Zsh is already the default shell."
+    fi
 fi
+sep
+
+# =============================================================================
+# DONE
+# =============================================================================
+sep
+echo -e "${GREEN}${BOLD}"
+echo "   ███████╗███████╗██╗  ██╗"
+echo "      ███╔╝██╔════╝██║  ██║"
+echo "     ███╔╝ ███████╗███████║"
+echo "    ███╔╝  ╚════██║██╔══██║"
+echo "   ███████╗███████║██║  ██║"
+echo "   ╚══════╝╚══════╝╚═╝  ╚═╝  installed!"
+echo -e "${RESET}"
+sep
+echo -e "  ${BOLD}Next steps:${RESET}"
+echo -e "  1. ${CYAN}exec zsh${RESET}              — start Zsh now"
+echo -e "  2. ${CYAN}p10k configure${RESET}        — interactive prompt wizard"
+echo -e "  3. Set terminal font to  ${CYAN}MesloLGS NF${RESET}  for icons"
+echo -e "  4. Edit ${CYAN}~/.zshrc${RESET}          to customize further"
+echo ""
+echo -e "  ${YELLOW}Tip:${RESET} Add machine-specific settings to ${CYAN}~/.zshrc.local${RESET}"
+sep
+echo ""
