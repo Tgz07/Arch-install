@@ -3,7 +3,7 @@
 ## 1. Clone repository
 
 ```bash
-[git clone git@github.com:Tgz07/Arch-install.git](https://github.com/Tgz07/Arch-install.git)
+git clone https://github.com/Tgz07/Arch-install.git
 cd Arch-install
 ```
 
